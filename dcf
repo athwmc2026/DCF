@@ -1,0 +1,205 @@
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="DCF Fair Value Sensitivity", layout="wide")
+
+# --- Core model (replicates the Excel logic in code) ---
+def fair_value(
+    g_1_5: float,
+    m_1_5: float,
+    g_6_plus: float,
+    m_6_plus: float,
+    discount_rate: float = 0.10,
+    rev0: float = 100.0,
+    horizon: int = 40
+) -> float:
+    """
+    Mirrors the workbook:
+    - Revenues start at rev0 in Year 0.
+    - Revenue grows at g_1_5 for Years 1-5, then at g_6_plus for Years 6+.
+    - FCF = Revenue * margin, with m_1_5 for Years 1-5 and m_6_plus for Years 6+.
+    - Present value = sum_{t=1..horizon} FCF_t / (1+discount_rate)^t
+    """
+    rev = rev0
+    pv = 0.0
+    for t in range(1, horizon + 1):
+        g = g_1_5 if t <= 5 else g_6_plus
+        rev = rev * (1.0 + g)
+        m = m_1_5 if t <= 5 else m_6_plus
+        fcf = rev * m
+        pv += fcf / ((1.0 + discount_rate) ** t)
+    return float(pv)
+
+def pct_input(label, value, help=None, key=None):
+    # Streamlit stores decimals; show % in UI
+    return st.number_input(
+        label,
+        value=float(value) * 100.0,
+        step=0.25,
+        format="%.2f",
+        help=help,
+        key=key
+    ) / 100.0
+
+# --- Defaults (from your Excel layout) ---
+DEFAULTS = {
+    "g_1_5": 0.15,     # G6
+    "m_1_5": 0.30,     # G7
+    "g_6_plus": 0.10,  # K6
+    "m_6_plus": 0.25,  # K7
+    "discount_rate": 0.10,  # D6
+    "rev0": 100.0,     # D11
+    "horizon": 40      # Years 1..40
+}
+
+st.title("DCF Fair Value Calculator + Years 6+ Sensitivity")
+
+with st.expander("Model assumptions (matches your Excel layout)", expanded=False):
+    st.markdown(
+        """
+- **G6**: Revenue growth (Years 1–5)  
+- **G7**: FCF margin (Years 1–5)  
+- **K6**: Revenue growth (Years 6+)  
+- **K7**: FCF margin (Years 6+)  
+- **D16 output**: Sum of discounted FCFs (Years 1–40 by default)
+        """.strip()
+    )
+
+left, right = st.columns([1, 1], gap="large")
+
+with left:
+    st.subheader("1) Baseline inputs")
+    g_1_5 = pct_input("Revenue growth (Years 1–5) — G6 (%)", DEFAULTS["g_1_5"])
+    m_1_5 = pct_input("FCF margin (Years 1–5) — G7 (%)", DEFAULTS["m_1_5"])
+    st.divider()
+    st.markdown("**Years 6+ (main sensitivity levers):**")
+    g_6_plus = pct_input("Revenue growth (Years 6+) — K6 (%)", DEFAULTS["g_6_plus"])
+    m_6_plus = pct_input("FCF margin (Years 6+) — K7 (%)", DEFAULTS["m_6_plus"])
+
+with right:
+    st.subheader("2) Output")
+    discount_rate = pct_input("Discount rate — D6 (%)", DEFAULTS["discount_rate"])
+    rev0 = st.number_input("Starting revenue (Year 0) — D11", value=float(DEFAULTS["rev0"]), step=1.0, format="%.2f")
+    horizon = st.slider("Projection horizon (Years)", min_value=10, max_value=60, value=int(DEFAULTS["horizon"]), step=1)
+
+    fv = fair_value(g_1_5, m_1_5, g_6_plus, m_6_plus, discount_rate, rev0, horizon)
+    st.metric("Implied fair value (D16)", f"{fv:,.2f}")
+
+    fv_hold_6p = fair_value(
+        g_1_5, m_1_5,
+        DEFAULTS["g_6_plus"], DEFAULTS["m_6_plus"],
+        discount_rate, rev0, horizon
+    )
+    delta = fv - fv_hold_6p
+    st.caption("Delta vs holding Years 6+ at the default (K6=10%, K7=25%)")
+    st.metric("Δ Fair value from changing Years 6+ assumptions", f"{delta:,.2f}")
+
+st.divider()
+st.subheader("3) Years 6+ sensitivity analysis (K6 & K7)")
+
+colA, colB, colC = st.columns([1.2, 1, 1])
+
+with colA:
+    range_choice = st.radio(
+        "Sensitivity range around current K6/K7",
+        options=["±200 bps (±2.00 pts)", "±500 bps (±5.00 pts)", "±1000 bps (±10.00 pts)"],
+        index=0
+    )
+    step_pts = st.select_slider(
+        "Step size (percentage points)",
+        options=[0.25, 0.50, 1.00],
+        value=0.50,
+        help="Smaller steps = more scenarios."
+    )
+
+    if "200" in range_choice:
+        spread = 0.02
+    elif "500" in range_choice:
+        spread = 0.05
+    else:
+        spread = 0.10
+
+    st.caption("Ranges are treated as **percentage points** (bps), e.g., 6% ± 2% ⇒ 4% to 8%.")
+
+with colB:
+    st.markdown("**Current Years 6+ baseline**")
+    st.write(f"K6 (growth): **{g_6_plus*100:.2f}%**")
+    st.write(f"K7 (margin): **{m_6_plus*100:.2f}%**")
+    st.write(f"Range: ± **{spread*100:.2f} pts**")
+
+with colC:
+    st.markdown("**Scenario grid size**")
+    steps = int(round((2 * spread) / (step_pts / 100.0))) + 1
+    st.write(f"{steps} × {steps} = **{steps*steps:,}** scenarios")
+    run = st.button("Run sensitivity", type="primary", use_container_width=True)
+
+def clamp(x, lo=-0.99, hi=10.0):
+    return float(min(max(x, lo), hi))
+
+if run:
+    g_vals = np.arange(g_6_plus - spread, g_6_plus + spread + 1e-12, step_pts / 100.0)
+    m_vals = np.arange(m_6_plus - spread, m_6_plus + spread + 1e-12, step_pts / 100.0)
+
+    g_vals = np.array([clamp(x) for x in g_vals])
+    m_vals = np.array([clamp(x) for x in m_vals])
+
+    fvs = []
+    grid = np.zeros((len(m_vals), len(g_vals)), dtype=float)
+
+    for i, m in enumerate(m_vals):
+        for j, g in enumerate(g_vals):
+            v = fair_value(g_1_5, m_1_5, g, m, discount_rate, rev0, horizon)
+            grid[i, j] = v
+            fvs.append(v)
+
+    fvs = np.array(fvs)
+
+    stats = {
+        "Min": float(np.min(fvs)),
+        "P10": float(np.percentile(fvs, 10)),
+        "Median": float(np.median(fvs)),
+        "Mean": float(np.mean(fvs)),
+        "P90": float(np.percentile(fvs, 90)),
+        "Max": float(np.max(fvs)),
+        "Baseline (current K6/K7)": float(fv),
+    }
+
+    st.markdown("#### Summary")
+    st.dataframe(pd.DataFrame([stats]).T.rename(columns={0: "Fair value"}).style.format("{:,.2f}"),
+                 use_container_width=True)
+
+    st.markdown("#### Distribution of fair value outcomes (all K6/K7 combinations)")
+    fig1, ax1 = plt.subplots()
+    ax1.hist(fvs, bins=30)
+    ax1.set_xlabel("Fair value")
+    ax1.set_ylabel("Count of scenarios")
+    st.pyplot(fig1, clear_figure=True)
+
+    st.markdown("#### Heatmap (K6 vs K7 → fair value)")
+    fig2, ax2 = plt.subplots()
+    im = ax2.imshow(grid, aspect="auto", origin="lower")
+    ax2.set_xlabel("K6: Revenue growth (Years 6+)")
+    ax2.set_ylabel("K7: FCF margin (Years 6+)")
+    ax2.set_xticks(np.linspace(0, len(g_vals) - 1, min(6, len(g_vals))).astype(int))
+    ax2.set_yticks(np.linspace(0, len(m_vals) - 1, min(6, len(m_vals))).astype(int))
+    ax2.set_xticklabels([f"{g_vals[k]*100:.1f}%" for k in ax2.get_xticks()])
+    ax2.set_yticklabels([f"{m_vals[k]*100:.1f}%" for k in ax2.get_yticks()])
+    fig2.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+    st.pyplot(fig2, clear_figure=True)
+
+    st.markdown("#### Download scenario grid")
+    df_grid = pd.DataFrame(
+        grid,
+        index=[f"{m*100:.2f}%" for m in m_vals],
+        columns=[f"{g*100:.2f}%" for g in g_vals]
+    )
+    csv = df_grid.to_csv().encode("utf-8")
+    st.download_button("Download grid as CSV", data=csv, file_name="k6_k7_sensitivity_grid.csv", mime="text/csv")
+else:
+    st.info("Set your baseline assumptions, then click **Run sensitivity** to see the distribution and heatmap.")
+streamlit>=1.32
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7

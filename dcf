@@ -199,7 +199,4 @@ if run:
     st.download_button("Download grid as CSV", data=csv, file_name="k6_k7_sensitivity_grid.csv", mime="text/csv")
 else:
     st.info("Set your baseline assumptions, then click **Run sensitivity** to see the distribution and heatmap.")
-streamlit>=1.32
-numpy>=1.24
-pandas>=2.0
-matplotlib>=3.7
+
